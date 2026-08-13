@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/local/google-to-domate/internal/config"
@@ -98,21 +99,8 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		todoByID[t.ID] = t
 	}
 
-	// Routine day-items: only a mapped primary todo syncs back to Google.
-	// Unmapped siblings would otherwise explode into duplicate Google events.
 	if err := e.pruneInactive(ctx, activeGoalIDs, todoByID); err != nil {
 		return err
-	}
-	for _, t := range activeTodos {
-		if t.RoutineID != "" {
-			m, _ := e.Store.GetByTodomate(t.ID)
-			if m == nil {
-				continue
-			}
-		}
-		if err := e.syncTodoToGoogle(ctx, t, live); err != nil {
-			return err
-		}
 	}
 
 	defaultGoal := e.Settings.DefaultGoalID
@@ -136,6 +124,8 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	} else {
 		e.logf("Google→Todomate import OFF (import_unmapped_google_events=false)")
 	}
+
+	// Google first so existing calendar events are mapped before Todomate→Google create.
 	for _, ev := range live {
 		if err := e.syncGoogleToTodo(ctx, ev, todoByID, defaultGoal); err != nil {
 			return err
@@ -154,8 +144,21 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		}
 	}
 
+	// Refresh mappings after Google→Todo; skip unmapped routine day-items.
+	for _, t := range activeTodos {
+		if t.RoutineID != "" {
+			m, _ := e.Store.GetByTodomate(t.ID)
+			if m == nil {
+				continue
+			}
+		}
+		if err := e.syncTodoToGoogle(ctx, t, live); err != nil {
+			return err
+		}
+	}
+
 	e.logf(
-		"Sync summary (dry_run=%v): create_google=%d update_google=%d prune_google=%d create_todo=%d create_routine=%d update_todo=%d delete_todo=%d google_link_skipped=%d",
+		"Sync summary (dry_run=%v): create_google=%d update_google=%d prune_google=%d create_todo=%d create_routine=%d update_todo=%d delete_todo=%d google_link_skipped=%d recover_mapping=%d",
 		e.Settings.DryRun,
 		e.stats["create_google"],
 		e.stats["update_google"],
@@ -165,6 +168,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		e.stats["update_todo"],
 		e.stats["google_cancelled_delete_todo"],
 		e.stats["google_link_skipped"],
+		e.stats["recover_mapping"],
 	)
 	e.logf("Sync cycle complete (dry_run=%v)", e.Settings.DryRun)
 	return nil
@@ -231,6 +235,22 @@ func (e *Engine) syncTodoToGoogle(ctx context.Context, todo models.TodoItem, liv
 		return nil
 	}
 	if m == nil {
+		// Already present on Google (imported earlier / link lost) → rematerialize mapping, never duplicate.
+		if existing := findLiveGoogleForTodo(todo, live); existing != nil {
+			e.logf("Recover mapping Todomate %s → Google %s (skip duplicate create)", todo.ID, existing.ID)
+			e.stats["recover_mapping"]++
+			if e.Settings.DryRun {
+				return nil
+			}
+			return e.Store.Upsert(models.SyncMapping{
+				TodomateID:          todo.ID,
+				GoogleEventID:       existing.ID,
+				TodomateFingerprint: fp,
+				GoogleFingerprint:   existing.Fingerprint(),
+				LastSyncedAt:        time.Now().UTC(),
+				LastOrigin:          "recover",
+			})
+		}
 		e.logf("Create Google event for Todomate %s (%s)", todo.ID, todo.Content)
 		e.stats["create_google"]++
 		if e.Settings.DryRun {
@@ -267,7 +287,22 @@ func (e *Engine) syncTodoToGoogle(ctx context.Context, todo models.TodoItem, liv
 	if e.Settings.DryRun {
 		return nil
 	}
-	updated, err := e.Google.UpdateEvent(ctx, m.GoogleEventID, todo.Content, *todo.Date, time.Time{}, todo.Memo, todo.ID, true)
+	start := *todo.Date
+	end := time.Time{}
+	allDay := true
+	memo := todo.Memo
+	if ge, ok := live[m.GoogleEventID]; ok {
+		// Never shrink a multi-day Google event down to a single day from one todo.
+		if googlecal.EventSpanDays(ge) > 1 {
+			start = ge.Start
+			end = ge.End
+			allDay = ge.AllDay
+		} else {
+			allDay = ge.AllDay
+			end = ge.End
+		}
+	}
+	updated, err := e.Google.UpdateEvent(ctx, m.GoogleEventID, todo.Content, start, end, memo, todo.ID, allDay)
 	if err != nil {
 		return err
 	}
@@ -408,6 +443,23 @@ func (e *Engine) syncGoogleToTodo(ctx context.Context, event models.CalendarEven
 		e.logf("Skip Google→Todomate create for %s (set todomate.default_goal_id)", event.ID)
 		return nil
 	}
+	// Matching Todomate item already exists (previous import / manual) → map, don't recreate.
+	if existing := findTodoForGoogleEvent(event, todoByID); existing != nil {
+		e.logf("Recover mapping Google %s → Todomate %s (skip duplicate create)", event.ID, existing.ID)
+		e.stats["recover_mapping"]++
+		if e.Settings.DryRun {
+			return nil
+		}
+		e.linkGoogleQuietly(ctx, event, existing.ID)
+		return e.Store.Upsert(models.SyncMapping{
+			TodomateID:          existing.ID,
+			GoogleEventID:       event.ID,
+			TodomateFingerprint: existing.Fingerprint(),
+			GoogleFingerprint:   fp,
+			LastSyncedAt:        time.Now().UTC(),
+			LastOrigin:          "recover",
+		})
+	}
 	return e.createOrRebuildRoutineFromGoogle(ctx, event, defaultGoal, nil)
 }
 
@@ -497,6 +549,69 @@ func orUntitled(s string) string {
 		return "(untitled)"
 	}
 	return s
+}
+
+func sameTitle(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+func findLiveGoogleForTodo(todo models.TodoItem, live map[string]models.CalendarEvent) *models.CalendarEvent {
+	if todo.Date == nil {
+		return nil
+	}
+	day := dateOnly(*todo.Date)
+	var byTitle *models.CalendarEvent
+	for _, ev := range live {
+		evCopy := ev
+		if ev.TodomateID != "" && ev.TodomateID == todo.ID {
+			return &evCopy
+		}
+		if !sameTitle(ev.Summary, todo.Content) {
+			continue
+		}
+		start := googlecal.EventDate(ev)
+		end := googlecal.EventInclusiveEnd(ev)
+		if !day.Before(start) && !day.After(end) {
+			// Prefer events already marked as sync-origin.
+			if ev.OriginSync || ev.TodomateID != "" {
+				return &evCopy
+			}
+			if byTitle == nil {
+				byTitle = &evCopy
+			}
+		}
+	}
+	return byTitle
+}
+
+func findTodoForGoogleEvent(event models.CalendarEvent, todoByID map[string]models.TodoItem) *models.TodoItem {
+	if event.TodomateID != "" {
+		if t, ok := todoByID[event.TodomateID]; ok {
+			return &t
+		}
+	}
+	start := googlecal.EventDate(event)
+	end := googlecal.EventInclusiveEnd(event)
+	title := orUntitled(event.Summary)
+	var match *models.TodoItem
+	for _, t := range todoByID {
+		if t.Date == nil || !sameTitle(t.Content, title) {
+			continue
+		}
+		day := dateOnly(*t.Date)
+		if day.Before(start) || day.After(end) {
+			continue
+		}
+		tCopy := t
+		// Prefer start-day item / mapped-looking primary.
+		if day.Equal(start) {
+			return &tCopy
+		}
+		if match == nil {
+			match = &tCopy
+		}
+	}
+	return match
 }
 
 func SummaryLine(stats map[string]int, dryRun bool) string {
