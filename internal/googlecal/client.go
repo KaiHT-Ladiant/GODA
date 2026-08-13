@@ -210,6 +210,41 @@ func EventDate(ev models.CalendarEvent) time.Time {
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
 
+// EventInclusiveEnd returns the last calendar day included in the event.
+// Google all-day ends are exclusive, so the inclusive end is End-1 day.
+func EventInclusiveEnd(ev models.CalendarEvent) time.Time {
+	start := EventDate(ev)
+	if ev.End.IsZero() {
+		return start
+	}
+	if ev.AllDay {
+		y, m, d := ev.End.Date()
+		endExclusive := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+		inclusive := endExclusive.AddDate(0, 0, -1)
+		if inclusive.Before(start) {
+			return start
+		}
+		return inclusive
+	}
+	y, m, d := ev.End.In(time.UTC).Date()
+	endDay := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	if endDay.Before(start) {
+		return start
+	}
+	return endDay
+}
+
+// EventSpanDays is the number of calendar days covered (inclusive).
+func EventSpanDays(ev models.CalendarEvent) int {
+	start := EventDate(ev)
+	end := EventInclusiveEnd(ev)
+	days := int(end.Sub(start).Hours()/24) + 1
+	if days < 1 {
+		return 1
+	}
+	return days
+}
+
 func asString(v any) string {
 	if v == nil {
 		return ""

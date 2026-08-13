@@ -11,6 +11,7 @@ import (
 	"github.com/local/google-to-domate/internal/googlecal"
 	"github.com/local/google-to-domate/internal/models"
 	"github.com/local/google-to-domate/internal/store"
+	"github.com/local/google-to-domate/internal/textutil"
 	"github.com/local/google-to-domate/internal/todomate"
 )
 
@@ -97,21 +98,43 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		todoByID[t.ID] = t
 	}
 
+	// Routine day-items: only a mapped primary todo syncs back to Google.
+	// Unmapped siblings would otherwise explode into duplicate Google events.
 	if err := e.pruneInactive(ctx, activeGoalIDs, todoByID); err != nil {
 		return err
 	}
 	for _, t := range activeTodos {
+		if t.RoutineID != "" {
+			m, _ := e.Store.GetByTodomate(t.ID)
+			if m == nil {
+				continue
+			}
+		}
 		if err := e.syncTodoToGoogle(ctx, t, live); err != nil {
 			return err
 		}
 	}
 
 	defaultGoal := e.Settings.DefaultGoalID
+	defaultGoalTitle := ""
 	if defaultGoal == "" && len(activeGoals) > 0 {
 		sort.SliceStable(activeGoals, func(i, j int) bool {
 			return activeGoals[i].Priority < activeGoals[j].Priority
 		})
 		defaultGoal = activeGoals[0].ID
+		defaultGoalTitle = activeGoals[0].Title
+	} else if defaultGoal != "" {
+		for _, g := range activeGoals {
+			if g.ID == defaultGoal {
+				defaultGoalTitle = g.Title
+				break
+			}
+		}
+	}
+	if e.Settings.ImportUnmappedGoogleEvents {
+		e.logf("Google→Todomate import ON (default goal: %s [%s])", defaultGoalTitle, defaultGoal)
+	} else {
+		e.logf("Google→Todomate import OFF (import_unmapped_google_events=false)")
 	}
 	for _, ev := range live {
 		if err := e.syncGoogleToTodo(ctx, ev, todoByID, defaultGoal); err != nil {
@@ -126,23 +149,38 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		e.logf("Google cancelled %s → delete Todomate %s", ev.ID, m.TodomateID)
 		e.stats["google_cancelled_delete_todo"]++
 		if !e.Settings.DryRun {
-			_ = e.Todo.DeleteTodoItem(m.TodomateID)
+			e.deleteTodomateMapped(m.TodomateID)
 			_ = e.Store.DeleteByGoogle(ev.ID)
 		}
 	}
 
 	e.logf(
-		"Sync summary (dry_run=%v): create_google=%d update_google=%d prune_google=%d create_todo=%d update_todo=%d delete_todo=%d",
+		"Sync summary (dry_run=%v): create_google=%d update_google=%d prune_google=%d create_todo=%d create_routine=%d update_todo=%d delete_todo=%d google_link_skipped=%d",
 		e.Settings.DryRun,
 		e.stats["create_google"],
 		e.stats["update_google"],
 		e.stats["prune_google"],
 		e.stats["create_todo"],
+		e.stats["create_routine"],
 		e.stats["update_todo"],
 		e.stats["google_cancelled_delete_todo"],
+		e.stats["google_link_skipped"],
 	)
 	e.logf("Sync cycle complete (dry_run=%v)", e.Settings.DryRun)
 	return nil
+}
+
+func (e *Engine) deleteTodomateMapped(todoID string) {
+	remote, err := e.Todo.GetTodoItem(todoID)
+	if err != nil {
+		_ = e.Todo.DeleteTodoItem(todoID)
+		return
+	}
+	if remote != nil && remote.RoutineID != "" {
+		_ = e.Todo.DeleteRoutineAndTodos(remote.RoutineID)
+		return
+	}
+	_ = e.Todo.DeleteTodoItem(todoID)
 }
 
 func (e *Engine) pruneInactive(ctx context.Context, activeGoalIDs map[string]bool, activeTodoByID map[string]models.TodoItem) error {
@@ -162,7 +200,7 @@ func (e *Engine) pruneInactive(ctx context.Context, activeGoalIDs map[string]boo
 		reason := ""
 		switch {
 		case remote == nil:
-			reason = "deleted"
+			reason = "deleted_or_inaccessible"
 		case !activeGoalIDs[remote.GoalID]:
 			reason = "inactive_goal"
 		case e.Settings.SkipCompletedTodos && remote.IsDone:
@@ -259,12 +297,49 @@ func (e *Engine) syncGoogleToTodo(ctx context.Context, event models.CalendarEven
 	}
 	fp := event.Fingerprint()
 	onDate := googlecal.EventDate(event)
+	span := googlecal.EventSpanDays(event)
+	needsMultiDayRoutine := event.AllDay && span > 1
 
 	if m != nil {
+		todo, hasTodo := todoByID[m.TodomateID]
+		if !hasTodo {
+			if remote, err := e.Todo.GetTodoItem(m.TodomateID); err == nil && remote != nil {
+				todo = *remote
+				hasTodo = true
+			}
+		}
+
+		// Already synced as a single day but Google event spans multiple days → rebuild as routine.
+		if needsMultiDayRoutine && hasTodo && todo.RoutineID == "" {
+			return e.createOrRebuildRoutineFromGoogle(ctx, event, defaultGoalOr(todo.GoalID, defaultGoal), m)
+		}
+
 		if m.GoogleFingerprint == fp {
+			// Clean up previously synced HTML memos even when fingerprint is unchanged.
+			if hasTodo && textutil.LooksLikeHTML(todo.Memo) {
+				plain := textutil.FromHTML(event.Description)
+				if plain != todo.Memo {
+					e.logf("Strip HTML memo on Todomate %s from Google %s", m.TodomateID, event.ID)
+					e.stats["update_todo"]++
+					if !e.Settings.DryRun {
+						if _, err := e.Todo.UpdateTodoItem(m.TodomateID, nil, nil, &plain); err != nil {
+							return err
+						}
+					}
+				}
+			}
 			return nil
 		}
-		if todo, ok := todoByID[m.TodomateID]; ok {
+
+		if needsMultiDayRoutine {
+			goal := defaultGoal
+			if hasTodo {
+				goal = defaultGoalOr(todo.GoalID, defaultGoal)
+			}
+			return e.createOrRebuildRoutineFromGoogle(ctx, event, goal, m)
+		}
+
+		if hasTodo {
 			googleNewer := !event.Updated.Before(todo.UpdatedAt)
 			if !googleNewer && !e.Settings.PreferGoogleOnTie {
 				return nil
@@ -275,7 +350,24 @@ func (e *Engine) syncGoogleToTodo(ctx context.Context, event models.CalendarEven
 				return nil
 			}
 			summary := event.Summary
-			desc := event.Description
+			desc := textutil.FromHTML(event.Description)
+			// If previous mapping was a routine but event is now single-day, drop the routine.
+			if todo.RoutineID != "" {
+				_ = e.Todo.DeleteRoutineAndTodos(todo.RoutineID)
+				created, err := e.Todo.CreateTodoItem(orUntitled(event.Summary), defaultGoalOr(todo.GoalID, defaultGoal), onDate, desc, "")
+				if err != nil {
+					return err
+				}
+				e.linkGoogleQuietly(ctx, event, created.ID)
+				return e.Store.Upsert(models.SyncMapping{
+					TodomateID:          created.ID,
+					GoogleEventID:       event.ID,
+					TodomateFingerprint: created.Fingerprint(),
+					GoogleFingerprint:   fp,
+					LastSyncedAt:        time.Now().UTC(),
+					LastOrigin:          "google",
+				})
+			}
 			updated, err := e.Todo.UpdateTodoItem(m.TodomateID, &summary, &onDate, &desc)
 			if err != nil {
 				return err
@@ -293,24 +385,7 @@ func (e *Engine) syncGoogleToTodo(ctx context.Context, event models.CalendarEven
 			e.logf("No default_goal_id; skip creating Todomate for %s", event.ID)
 			return nil
 		}
-		e.logf("Recreate Todomate for Google %s", event.ID)
-		e.stats["create_todo"]++
-		if e.Settings.DryRun {
-			return nil
-		}
-		created, err := e.Todo.CreateTodoItem(orUntitled(event.Summary), defaultGoal, onDate, event.Description)
-		if err != nil {
-			return err
-		}
-		_, _ = e.Google.UpdateEvent(ctx, event.ID, event.Summary, event.Start, event.End, event.Description, created.ID, event.AllDay)
-		return e.Store.Upsert(models.SyncMapping{
-			TodomateID:          created.ID,
-			GoogleEventID:       event.ID,
-			TodomateFingerprint: created.Fingerprint(),
-			GoogleFingerprint:   fp,
-			LastSyncedAt:        time.Now().UTC(),
-			LastOrigin:          "google",
-		})
+		return e.createOrRebuildRoutineFromGoogle(ctx, event, defaultGoal, m)
 	}
 
 	if event.OriginSync && event.TodomateID != "" {
@@ -333,27 +408,83 @@ func (e *Engine) syncGoogleToTodo(ctx context.Context, event models.CalendarEven
 		e.logf("Skip Google→Todomate create for %s (set todomate.default_goal_id)", event.ID)
 		return nil
 	}
-	e.logf("Create Todomate item from Google %s (%s)", event.ID, event.Summary)
+	return e.createOrRebuildRoutineFromGoogle(ctx, event, defaultGoal, nil)
+}
+
+func defaultGoalOr(goalID, fallback string) string {
+	if goalID != "" {
+		return goalID
+	}
+	return fallback
+}
+
+func (e *Engine) createOrRebuildRoutineFromGoogle(ctx context.Context, event models.CalendarEvent, defaultGoal string, existing *models.SyncMapping) error {
+	onDate := googlecal.EventDate(event)
+	span := googlecal.EventSpanDays(event)
+	endInclusive := googlecal.EventInclusiveEnd(event)
+	title := orUntitled(event.Summary)
+	memo := textutil.FromHTML(event.Description)
+	fp := event.Fingerprint()
+
+	if existing != nil && !e.Settings.DryRun {
+		e.deleteTodomateMapped(existing.TodomateID)
+		_ = e.Store.DeleteByGoogle(event.ID)
+	}
+
+	if event.AllDay && span > 1 {
+		e.logf(
+			"Create Todomate routine from Google %s (%s) %s~%s (%d days)",
+			event.ID, title, onDate.Format("2006-01-02"), endInclusive.Format("2006-01-02"), span,
+		)
+		e.stats["create_routine"]++
+		e.stats["create_todo"] += span
+		if e.Settings.DryRun {
+			return nil
+		}
+		_, first, _, err := e.Todo.CreateRoutineWithDailyTodos(title, defaultGoal, memo, onDate, endInclusive)
+		if err != nil {
+			return err
+		}
+		e.linkGoogleQuietly(ctx, event, first.ID)
+		return e.Store.Upsert(models.SyncMapping{
+			TodomateID:          first.ID,
+			GoogleEventID:       event.ID,
+			TodomateFingerprint: first.Fingerprint(),
+			GoogleFingerprint:   fp,
+			LastSyncedAt:        time.Now().UTC(),
+			LastOrigin:          "google",
+		})
+	}
+
+	e.logf("Create Todomate item from Google %s (%s)", event.ID, title)
 	e.stats["create_todo"]++
 	if e.Settings.DryRun {
 		return nil
 	}
-	created, err := e.Todo.CreateTodoItem(orUntitled(event.Summary), defaultGoal, onDate, event.Description)
+	created, err := e.Todo.CreateTodoItem(title, defaultGoal, onDate, memo, "")
 	if err != nil {
 		return err
 	}
-	linked, err := e.Google.UpdateEvent(ctx, event.ID, event.Summary, event.Start, event.End, event.Description, created.ID, event.AllDay)
-	if err != nil {
-		return err
-	}
+	e.linkGoogleQuietly(ctx, event, created.ID)
 	return e.Store.Upsert(models.SyncMapping{
 		TodomateID:          created.ID,
-		GoogleEventID:       linked.ID,
+		GoogleEventID:       event.ID,
 		TodomateFingerprint: created.Fingerprint(),
-		GoogleFingerprint:   linked.Fingerprint(),
+		GoogleFingerprint:   fp,
 		LastSyncedAt:        time.Now().UTC(),
 		LastOrigin:          "google",
 	})
+}
+
+// linkGoogleQuietly attaches Todomate id to the Google event when permitted.
+// Some calendars/events reject private extendedProperties (PERMISSION_DENIED);
+// Todomate-side sync must still succeed in that case.
+func (e *Engine) linkGoogleQuietly(ctx context.Context, event models.CalendarEvent, todomateID string) {
+	_, err := e.Google.UpdateEvent(ctx, event.ID, event.Summary, event.Start, event.End, event.Description, todomateID, event.AllDay)
+	if err != nil {
+		e.logf("Warn: Google link skipped for %s (%s): %v", event.ID, event.Summary, err)
+		e.stats["google_link_skipped"]++
+	}
 }
 
 func dateOnly(t time.Time) time.Time {

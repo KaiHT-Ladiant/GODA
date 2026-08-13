@@ -68,14 +68,20 @@ type CalendarEvent struct {
 
 func (e CalendarEvent) Fingerprint() string {
 	start := e.Start.Format(time.RFC3339)
+	end := ""
 	if e.AllDay {
 		start = e.Start.Format("2006-01-02")
+		if !e.End.IsZero() {
+			end = e.End.Format("2006-01-02")
+		}
+	} else if !e.End.IsZero() {
+		end = e.End.Format(time.RFC3339)
 	}
 	allDay := "0"
 	if e.AllDay {
 		allDay = "1"
 	}
-	return stringsJoin([]string{e.Summary, start, allDay, e.Description, e.Status}, "|")
+	return stringsJoin([]string{e.Summary, start, end, allDay, e.Description, e.Status}, "|")
 }
 
 type SyncMapping struct {

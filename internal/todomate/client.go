@@ -2,6 +2,7 @@ package todomate
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -248,7 +249,7 @@ func (c *Client) GetTodoItem(id string) (*models.TodoItem, error) {
 	}
 	defer res.Body.Close()
 	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode == http.StatusNotFound {
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusForbidden {
 		return nil, nil
 	}
 	if res.StatusCode >= 300 {
@@ -262,24 +263,28 @@ func (c *Client) GetTodoItem(id string) (*models.TodoItem, error) {
 	return &item, nil
 }
 
-func (c *Client) CreateTodoItem(content, goalID string, onDate time.Time, memo string) (models.TodoItem, error) {
+func (c *Client) CreateTodoItem(content, goalID string, onDate time.Time, memo, routineID string) (models.TodoItem, error) {
 	docID := randomID(20)
 	nowMS := time.Now().UTC().UnixMilli()
 	dateMS := time.Date(onDate.Year(), onDate.Month(), onDate.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	var routineVal any
+	if routineID != "" {
+		routineVal = routineID
+	}
 	fields := map[string]any{
-		"id":         toValue(docID),
-		"writerID":   toValue(c.Session.LocalID),
-		"goalID":     toValue(goalID),
-		"content":    toValue(content),
-		"createTime": toValue(nowMS),
-		"date":       toValue(dateMS),
-		"isDone":     toValue(false),
-		"memo":       toValue(memo),
-		"routineID":  toValue(nil),
-		"remindAt":   toValue(nil),
-		"doneTime":   toValue(nil),
-		"hasPhoto":   toValue(false),
-		"hasTimer":   toValue(false),
+		"id":           toValue(docID),
+		"writerID":     toValue(c.Session.LocalID),
+		"goalID":       toValue(goalID),
+		"content":      toValue(content),
+		"createTime":   toValue(nowMS),
+		"date":         toValue(dateMS),
+		"isDone":       toValue(false),
+		"memo":         toValue(memo),
+		"routineID":    toValue(routineVal),
+		"remindAt":     toValue(nil),
+		"doneTime":     toValue(nil),
+		"hasPhoto":     toValue(false),
+		"hasTimer":     toValue(false),
 		"isMemoPublic": toValue(false),
 	}
 	urlStr := fmt.Sprintf("%s/TodoItem?documentId=%s", c.base(), url.QueryEscape(docID))
@@ -288,6 +293,155 @@ func (c *Client) CreateTodoItem(content, goalID string, onDate time.Time, memo s
 		return models.TodoItem{}, err
 	}
 	return parseTodo(doc), nil
+}
+
+// RoutineRepeatDaily matches Todomate RoutineRepeatType.daily (0).
+const RoutineRepeatDaily = 0
+
+type Routine struct {
+	ID         string
+	UserID     string
+	Title      string
+	GoalID     string
+	RepeatType int
+	StartDate  *time.Time
+	EndDate    *time.Time
+	CreateTime int64
+	IsManual   bool
+}
+
+func (c *Client) CreateRoutine(title, goalID string, start, endInclusive time.Time) (Routine, error) {
+	docID := randomID(20)
+	nowMS := time.Now().UTC().UnixMilli()
+	startMS := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	endMS := time.Date(endInclusive.Year(), endInclusive.Month(), endInclusive.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	fields := map[string]any{
+		"id":         toValue(docID),
+		"userID":     toValue(c.Session.LocalID),
+		"title":      toValue(title),
+		"goalID":     toValue(goalID),
+		"repeatType": toValue(int64(RoutineRepeatDaily)),
+		"startDate":  toValue(startMS),
+		"endDate":    toValue(endMS),
+		"createTime": toValue(nowMS),
+		"isManual":   toValue(false),
+		"time":       toValue(nil),
+	}
+	urlStr := fmt.Sprintf("%s/Routine?documentId=%s", c.base(), url.QueryEscape(docID))
+	var doc map[string]any
+	if err := c.doJSON(http.MethodPost, urlStr, map[string]any{"fields": fields}, &doc); err != nil {
+		return Routine{}, err
+	}
+	startCopy := time.UnixMilli(startMS).UTC()
+	endCopy := time.UnixMilli(endMS).UTC()
+	return Routine{
+		ID:         docID,
+		UserID:     c.Session.LocalID,
+		Title:      title,
+		GoalID:     goalID,
+		RepeatType: RoutineRepeatDaily,
+		StartDate:  &startCopy,
+		EndDate:    &endCopy,
+		CreateTime: nowMS,
+		IsManual:   false,
+	}, nil
+}
+
+func (c *Client) DeleteRoutine(id string) error {
+	req, err := http.NewRequest(http.MethodDelete, c.base()+"/Routine/"+url.PathEscape(id), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Session.IDToken)
+	res, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= 300 && res.StatusCode != http.StatusNotFound {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("delete routine: %s", string(b))
+	}
+	return nil
+}
+
+func (c *Client) ListTodoItemsByRoutine(routineID string) ([]models.TodoItem, error) {
+	if routineID == "" {
+		return nil, nil
+	}
+	docs, err := c.runQuery(map[string]any{
+		"from": []map[string]any{{"collectionId": "TodoItem"}},
+		"where": map[string]any{
+			"compositeFilter": map[string]any{
+				"op": "AND",
+				"filters": []map[string]any{
+					{
+						"fieldFilter": map[string]any{
+							"field": map[string]string{"fieldPath": "writerID"},
+							"op":    "EQUAL",
+							"value": toValue(c.Session.LocalID),
+						},
+					},
+					{
+						"fieldFilter": map[string]any{
+							"field": map[string]string{"fieldPath": "routineID"},
+							"op":    "EQUAL",
+							"value": toValue(routineID),
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]models.TodoItem, 0, len(docs))
+	for _, doc := range docs {
+		out = append(out, parseTodo(doc))
+	}
+	return out, nil
+}
+
+// CreateRoutineWithDailyTodos creates a daily Routine and one TodoItem per day (inclusive).
+// Returns the routine and the start-day todo (for Google mapping).
+func (c *Client) CreateRoutineWithDailyTodos(title, goalID, memo string, start, endInclusive time.Time) (Routine, models.TodoItem, int, error) {
+	start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
+	endInclusive = time.Date(endInclusive.Year(), endInclusive.Month(), endInclusive.Day(), 0, 0, 0, 0, time.UTC)
+	if endInclusive.Before(start) {
+		endInclusive = start
+	}
+	routine, err := c.CreateRoutine(title, goalID, start, endInclusive)
+	if err != nil {
+		return Routine{}, models.TodoItem{}, 0, err
+	}
+	var first models.TodoItem
+	count := 0
+	for d := start; !d.After(endInclusive); d = d.AddDate(0, 0, 1) {
+		item, err := c.CreateTodoItem(title, goalID, d, memo, routine.ID)
+		if err != nil {
+			return routine, first, count, err
+		}
+		count++
+		if count == 1 {
+			first = item
+		}
+	}
+	return routine, first, count, nil
+}
+
+func (c *Client) DeleteRoutineAndTodos(routineID string) error {
+	if routineID == "" {
+		return nil
+	}
+	items, err := c.ListTodoItemsByRoutine(routineID)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		_ = c.DeleteTodoItem(item.ID)
+	}
+	return c.DeleteRoutine(routineID)
 }
 
 func (c *Client) UpdateTodoItem(id string, content *string, onDate *time.Time, memo *string) (models.TodoItem, error) {
@@ -599,10 +753,17 @@ func toSet(ids []string) map[string]bool {
 func randomID(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, n)
-	now := time.Now().UnixNano()
+	if _, err := rand.Read(b); err != nil {
+		// Extremely unlikely; fall back to time-based non-negative index.
+		now := uint64(time.Now().UnixNano())
+		for i := range b {
+			now = now*1103515245 + 12345
+			b[i] = letters[now%uint64(len(letters))]
+		}
+		return string(b)
+	}
 	for i := range b {
-		now = now*1103515245 + 12345
-		b[i] = letters[(now)%int64(len(letters))]
+		b[i] = letters[int(b[i])%len(letters)]
 	}
 	return string(b)
 }

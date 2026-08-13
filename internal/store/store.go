@@ -78,17 +78,22 @@ func (s *Store) Upsert(m models.SyncMapping) error {
 	if !m.LastSyncedAt.IsZero() {
 		synced = m.LastSyncedAt.UTC().Format(time.RFC3339)
 	}
-	_, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// google_event_id is UNIQUE; clear any prior row for either side before insert.
+	if _, err := tx.Exec(`DELETE FROM mapping WHERE google_event_id=? OR todomate_id=?`, m.GoogleEventID, m.TodomateID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
 INSERT INTO mapping (todomate_id, google_event_id, todomate_fingerprint, google_fingerprint, last_synced_at, last_origin)
-VALUES (?, ?, ?, ?, ?, ?)
-ON CONFLICT(todomate_id) DO UPDATE SET
-  google_event_id=excluded.google_event_id,
-  todomate_fingerprint=excluded.todomate_fingerprint,
-  google_fingerprint=excluded.google_fingerprint,
-  last_synced_at=excluded.last_synced_at,
-  last_origin=excluded.last_origin`,
-		m.TodomateID, m.GoogleEventID, m.TodomateFingerprint, m.GoogleFingerprint, synced, m.LastOrigin)
-	return err
+VALUES (?, ?, ?, ?, ?, ?)`,
+		m.TodomateID, m.GoogleEventID, m.TodomateFingerprint, m.GoogleFingerprint, synced, m.LastOrigin); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteByTodomate(id string) error {

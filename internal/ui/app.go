@@ -266,23 +266,36 @@ func (s *Server) setBusy(v bool) {
 func (s *Server) runSync() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	httpClient, err := googleauth.GetClient(ctx, s.settings.GoogleCredentials, s.settings.GoogleToken)
+	// Reload config.local.toml each sync so flag changes apply without restart.
+	if refreshed, err := config.Load(s.settings.Root); err == nil {
+		s.mu.Lock()
+		s.settings = refreshed
+		s.mu.Unlock()
+	} else {
+		s.appendLog("config reload skipped: %v", err)
+	}
+	cfg := s.settings
+	s.appendLog(
+		"Config: dry_run=%v import_unmapped_google_events=%v default_goal_id=%q",
+		cfg.DryRun, cfg.ImportUnmappedGoogleEvents, cfg.DefaultGoalID,
+	)
+	httpClient, err := googleauth.GetClient(ctx, cfg.GoogleCredentials, cfg.GoogleToken)
 	if err != nil {
 		return fmt.Errorf("Google: %w", err)
 	}
-	session, err := todomate.EnsureSession(s.settings.TodomateAPIKey, s.settings.TodomateSession, "", "")
+	session, err := todomate.EnsureSession(cfg.TodomateAPIKey, cfg.TodomateSession, "", "")
 	if err != nil {
 		return fmt.Errorf("Todomate: %w", err)
 	}
-	st, err := store.Open(s.settings.SQLiteDB)
+	st, err := store.Open(cfg.SQLiteDB)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 	engine := &syncer.Engine{
-		Settings: s.settings,
-		Google:   googlecal.New(httpClient, s.settings.GoogleCalendarID),
-		Todo:     todomate.NewClient(s.settings.TodomateAPIKey, s.settings.TodomateProjectID, session),
+		Settings: cfg,
+		Google:   googlecal.New(httpClient, cfg.GoogleCalendarID),
+		Todo:     todomate.NewClient(cfg.TodomateAPIKey, cfg.TodomateProjectID, session),
 		Store:    st,
 		Logf:     s.appendLog,
 	}
