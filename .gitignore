@@ -1,0 +1,32 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# Secrets & local runtime data
+credentials.json
+token.json
+todomate_session.json
+*.sqlite
+*.sqlite3
+data/
+logs/
+config.local.toml
+bin/
+
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Probe / temp
+_probe_todomate*.py

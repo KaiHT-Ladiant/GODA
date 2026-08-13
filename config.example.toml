@@ -1,0 +1,39 @@
+# Sync settings for GODA (GOogletoDomAte)
+# Copy to config.local.toml and edit (config.local.toml is gitignored).
+
+[sync]
+# Poll interval in seconds
+interval_seconds = 60
+# How many days back/forward to sync
+lookback_days = 14
+lookahead_days = 60
+# If true, log planned changes without writing
+dry_run = false
+# Google Calendar ID (usually "primary")
+google_calendar_id = "primary"
+# Prefer Google when both sides changed at the same timestamp
+prefer_google_on_tie = true
+# Create Todomate items for Google events that are not yet mapped
+import_unmapped_google_events = true
+# Skip Todomate items already marked done (isDone)
+skip_completed_todos = true
+
+[paths]
+# Relative to project root unless absolute
+data_dir = "data"
+google_credentials = "credentials.json"
+google_token = "token.json"
+todomate_session = "todomate_session.json"
+sqlite_db = "data/sync.sqlite3"
+
+[todomate]
+# Put the Todomate Firebase web API key only in config.local.toml (gitignored).
+# Do not commit real keys. Extract from Todomate web client if needed.
+api_key = "YOUR_TODOMATE_FIREBASE_WEB_API_KEY"
+project_id = "mate-914f3"
+# Optional: only sync these Goal IDs (empty = all active goals)
+# include_goal_ids = []
+# Optional: never sync these Goal IDs even if active
+# exclude_goal_ids = []
+# Default goal ID used when creating Todomate items from Google events
+# default_goal_id = ""

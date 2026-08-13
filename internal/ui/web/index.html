@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GODA</title>
+  <link rel="icon" href="/goda-hero.png" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <img class="logo" src="/goda-hero.png" alt="GODA" />
+      <p class="brand">GODA</p>
+      <h1>Google Calendar ↔ Todomate</h1>
+      <p class="lead">GOogletoDomAte — local bidirectional sync. No public webhook server required in this mode.</p>
+    </header>
+
+    <section class="status-row">
+      <div class="status-card" id="googleStatus">Google: 확인 중…</div>
+      <div class="status-card" id="todoStatus">Todomate: 확인 중…</div>
+    </section>
+
+    <section class="panel">
+      <div class="actions">
+        <button id="btnGoogle">Google 로그인</button>
+        <button id="btnTodo">Todomate 로그인</button>
+        <button id="btnOnce" class="primary">지금 1회 동기화</button>
+        <button id="btnStart">폴링 시작</button>
+        <button id="btnStop">폴링 중지</button>
+      </div>
+      <div class="settings">
+        <label class="check">
+          <input type="checkbox" id="dryRun" />
+          Dry-run (미리보기만, 실제 쓰기 안 함)
+        </label>
+        <label>
+          폴링 간격(초)
+          <input type="number" id="interval" min="10" step="1" value="60" />
+        </label>
+        <button id="btnSaveSettings" class="ghost">설정 적용</button>
+      </div>
+    </section>
+
+    <section class="panel log-panel">
+      <div class="log-head">
+        <h2>로그</h2>
+        <span id="runState"></span>
+      </div>
+      <pre id="logs"></pre>
+    </section>
+  </main>
+
+  <dialog id="todoDialog">
+    <form method="dialog" id="todoForm">
+      <h3>Todomate 로그인</h3>
+      <label>이메일<input type="email" id="todoEmail" required /></label>
+      <label>비밀번호<input type="password" id="todoPassword" required /></label>
+      <div class="dialog-actions">
+        <button value="cancel" class="ghost">취소</button>
+        <button id="todoSubmit" value="default" class="primary">로그인</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

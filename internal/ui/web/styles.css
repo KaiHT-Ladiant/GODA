@@ -1,0 +1,163 @@
+:root {
+  --bg0: #13221c;
+  --bg1: #1c3228;
+  --ink: #f3f7f2;
+  --muted: #b7c7bc;
+  --accent: #d8f36b;
+  --line: rgba(243, 247, 242, 0.14);
+  --card: rgba(255, 255, 255, 0.06);
+  --ok: #8dffb0;
+  --warn: #ffd27a;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  min-height: 100%;
+  color: var(--ink);
+  font-family: "Pretendard", "Segoe UI", sans-serif;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, #2f5a44 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #405628 0%, transparent 45%),
+    linear-gradient(160deg, var(--bg0), #0c1612 60%, var(--bg1));
+}
+
+.shell {
+  width: min(980px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 2.5rem 0 3rem;
+}
+
+.hero { margin-bottom: 1.5rem; }
+.logo {
+  width: 88px;
+  height: 88px;
+  border-radius: 18px;
+  display: block;
+  margin-bottom: 0.9rem;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+}
+.brand {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.hero h1 {
+  margin: 0;
+  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  font-weight: 700;
+}
+.lead {
+  margin: 0.7rem 0 0;
+  color: var(--muted);
+  max-width: 40rem;
+  line-height: 1.5;
+}
+
+.status-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.status-card {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  background: var(--card);
+  backdrop-filter: blur(8px);
+}
+
+.panel {
+  border: 1px solid var(--line);
+  background: rgba(10, 18, 14, 0.55);
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.actions, .settings, .dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+.settings { margin-top: 0.9rem; }
+.settings label { color: var(--muted); font-size: 0.92rem; }
+.check { display: inline-flex; gap: 0.45rem; align-items: center; }
+
+button, input {
+  font: inherit;
+}
+button {
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.06);
+  color: var(--ink);
+  padding: 0.55rem 0.9rem;
+  cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease;
+}
+button:hover { transform: translateY(-1px); background: rgba(255,255,255,0.1); }
+button.primary {
+  background: var(--accent);
+  color: #152016;
+  border-color: transparent;
+  font-weight: 650;
+}
+button.ghost { background: transparent; }
+input[type="number"], input[type="email"], input[type="password"] {
+  margin-left: 0.4rem;
+  background: rgba(0,0,0,0.25);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  padding: 0.4rem 0.55rem;
+  min-width: 5rem;
+}
+
+.log-panel { min-height: 280px; }
+.log-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.5rem;
+}
+.log-head h2 { margin: 0; font-size: 1rem; }
+#runState { color: var(--muted); font-size: 0.85rem; }
+#logs {
+  margin: 0;
+  min-height: 240px;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 0.8rem;
+  background: rgba(0,0,0,0.28);
+  border: 1px solid var(--line);
+  color: #dce8df;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+dialog {
+  border: 1px solid var(--line);
+  background: #15241d;
+  color: var(--ink);
+  padding: 1.1rem;
+  width: min(420px, calc(100% - 2rem));
+}
+dialog::backdrop { background: rgba(0,0,0,0.55); }
+dialog form {
+  display: grid;
+  gap: 0.75rem;
+}
+dialog label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+}
+dialog input { margin-left: 0; width: 100%; }
+
+@media (max-width: 720px) {
+  .status-row { grid-template-columns: 1fr; }
+}
