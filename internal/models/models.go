@@ -26,7 +26,7 @@ type TodoItem struct {
 	WriterID   string
 	GoalID     string
 	Content    string
-	Date       *time.Time // date-only (UTC midnight of calendar day)
+	Date       *time.Time // date-only (Asia/Seoul midnight of the calendar day)
 	CreateTime int64
 	IsDone     bool
 	RemindAt   *int64
@@ -53,17 +53,20 @@ func (t TodoItem) Fingerprint() string {
 }
 
 type CalendarEvent struct {
-	ID          string
-	Summary     string
-	Start       time.Time
-	End         time.Time
-	Updated     time.Time
-	Status      string
-	Description string
-	AllDay      bool
-	ETag        string
-	TodomateID  string
-	OriginSync  bool
+	ID               string
+	Summary          string
+	Start            time.Time
+	End              time.Time
+	Updated          time.Time
+	Status           string
+	Description      string
+	AllDay           bool
+	ETag             string
+	TodomateID       string
+	OriginSync       bool
+	Owned            bool     // private g2d_owned=1, set only when GODA creates the event
+	RecurringEventID string   // non-empty ⇒ this row is one instance, not the series
+	Recurrence       []string // set on a series master (RRULE lines)
 }
 
 func (e CalendarEvent) Fingerprint() string {
@@ -91,6 +94,16 @@ type SyncMapping struct {
 	GoogleFingerprint   string
 	LastSyncedAt        time.Time
 	LastOrigin          string
+	GoogleETag          string
+	GoogleOwned         bool
+	TombstonedAt        time.Time
+	TombstoneReason     string
+}
+
+// Tombstoned reports a soft-deleted link. The row is kept so a later run
+// does not recreate or hard-delete either side.
+func (m SyncMapping) Tombstoned() bool {
+	return !m.TombstonedAt.IsZero()
 }
 
 func stringsJoin(parts []string, sep string) string {

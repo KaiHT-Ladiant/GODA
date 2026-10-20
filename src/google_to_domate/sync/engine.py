@@ -43,7 +43,13 @@ class SyncEngine:
         self._stats: Counter[str] = Counter()
 
     def run_once(self) -> None:
-        self._stats = Counter()
+        raise RuntimeError(
+            "The Python sync engine is disabled. It does not enforce GODA "
+            "ownership, recurring-series, or deletion-threshold guards and "
+            "can delete calendar events or Todomate items. Use the Go client "
+            "(cmd/g2d)."
+        )
+        self._stats = Counter()  # noqa: unreachable
         today = date.today()
         start = today - timedelta(days=self.settings.lookback_days)
         end = today + timedelta(days=self.settings.lookahead_days)

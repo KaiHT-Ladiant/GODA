@@ -7,16 +7,28 @@ interval_seconds = 60
 # How many days back/forward to sync
 lookback_days = 14
 lookahead_days = 60
-# If true, log planned changes without writing
-dry_run = false
+# If true, log planned changes without writing.
+# Keep this true until a dry-run looks right. Omitted dry_run also stays true.
+dry_run = true
 # Google Calendar ID (usually "primary")
 google_calendar_id = "primary"
 # Prefer Google when both sides changed at the same timestamp
 prefer_google_on_tie = true
-# Create Todomate items for Google events that are not yet mapped
+# Create Todomate items for Google events that are not yet mapped.
+# Recurring series are imported as one Routine, or skipped when a todo
+# with the same title already exists. Google is not modified either way.
 import_unmapped_google_events = true
-# Skip Todomate items already marked done (isDone)
+# Skip Todomate items already marked done (isDone).
+# Completing a todo never deletes the calendar event.
 skip_completed_todos = true
+# Abort the cycle before any tombstone when more links would be retired.
+# 0 refuses every deletion.
+max_deletions_per_run = 3
+# When false (default), a deletion only tombstones the local link.
+# When true, GODA may delete the Todomate item for a Google event it created
+# that was cancelled — still only under the threshold, and a failed delete
+# keeps the link. GODA never deletes a Google event from this process.
+hard_delete = false
 
 [paths]
 # Relative to project root unless absolute

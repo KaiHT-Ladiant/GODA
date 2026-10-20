@@ -103,11 +103,14 @@ Fields:
 | time | any/null | optional time-of-day |
 | isManual | bool | client flag |
 
-GODA Google→Todomate multi-day (all-day span > 1 day):
+GODA Google→Todomate multi-day (all-day span > 1 day), only when nothing is mapped yet:
 
-1. Create `Routine` with `repeatType=0 (daily)`, `startDate`, `endDate` (Google all-day `end` is exclusive → Todomate end = end−1 day)
+1. Create `Routine` with `repeatType=0 (daily)`, `startDate`, `endDate` (Google all-day `end` is exclusive → Todomate end = end−1 day, calendar days in Asia/Seoul)
 2. Create one `TodoItem` per day in that inclusive range with the same `routineID`
 3. Map the **start-day** TodoItem ↔ Google event (siblings are not pushed back as new Google events)
+4. Do not delete an existing todo or routine to rebuild this
+
+A Google recurring series (`recurrence` / `recurringEventId`) is not expanded into per-instance todos and is never patched or deleted as instances. With import on, and only when no todo already uses that title, GODA creates one `Routine` (`repeatType` from `FREQ`, `daysOfMonth` from `BYMONTHDAY`) plus one representative todo, mapped to the **master** event id.
 
 ## REST patterns used by this project
 
@@ -125,9 +128,12 @@ Base:
 ## Mapping to Google Calendar
 
 - `content` → event `summary`
-- `date` → all-day event start
+- `date` → all-day event start, as an Asia/Seoul calendar day
 - `memo` → event `description`
-- Multi-day Google all-day → Todomate `Routine` (daily) + per-day todos
+- Multi-day Google all-day → Todomate `Routine` (daily) + per-day todos, without deleting an existing item
+- Recurring Google series → one Routine mapped to the master id, or skipped when the title already exists. Instances are not written
 - Google HTML descriptions are converted to plain text before writing Todomate `memo`
-- Linking private props back onto Google events may be skipped on PERMISSION_DENIED; Todomate create still proceeds
-- Inactive goal (`finishType != null`) → do **not** keep a Google event (delete if previously mapped)
+- `g2d_owned=1` is set only when GODA creates the Google event. Updates never add it, and events without it are not patched or deleted
+- A 403, 404, or other lookup error is not treated as "todo deleted"
+- Completing a todo, or moving its goal to inactive (`finishType != null`), does not delete the Google event
+- See `docs/sync-safety.md` for the deletion threshold and rollout
