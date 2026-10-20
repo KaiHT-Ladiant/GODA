@@ -12,10 +12,29 @@ The primary client is a **Go desktop GUI** that opens a local control UI in your
 
 - Sync active Todomate goals only (`finishType` empty)
 - Skip completed Todomate items by default (`skip_completed_todos`)
-- Prune Google events when the source todo is deleted or its goal becomes inactive
 - Optional Google → Todomate import (`import_unmapped_google_events`)
 - Local SQLite mapping store
-- Dry-run mode for safe previews
+- Dry-run on by default (`dry_run`; omitting the key stays on)
+- Ownership marker so GODA only writes Google events it created
+- Recurring series are not split into exceptions
+- Deletions are tombstoned, counted, and aborted when they exceed a threshold
+
+## Safety
+
+GODA used to list recurring events as instances (`singleEvents=true`) and then PATCH or DELETE those instance ids. It also treated a completed todo, an inactive goal, and a Todomate 403/404 as “delete the Google event”, and it stamped `g2d_*` private properties onto events the user had created.
+
+That combination dropped occurrences of a monthly series such as “월세 지급 💲” and rebuilt OSCP study todos that only matched the calendar by title and day. The current rules:
+
+1. **Ownership.** `g2d_owned=1` is written only by `events.insert`. An event without it is never patched or deleted. `g2d_origin=sync` is not ownership; older builds wrote it while linking.
+2. **Recurrence.** Instances (`recurringEventId`) are never written. The series is skipped, or — when import is on and no todo already has that title — stored as one Todomate Routine mapped to the master id.
+3. **Completion and errors.** Marking a todo done does not delete a calendar event. HTTP 403, 404, and transport or 5xx errors are not “the todo was deleted”. The link stays.
+4. **Deletions.** The only automatic retirement is a non-recurring event GODA created that Google reports as cancelled. The link is tombstoned (the row remains). `hard_delete` defaults to false, so the Todomate item is kept. More than `max_deletions_per_run` proposals (default 3) abort the cycle before any tombstone or remote delete. A failed delete does not drop the link. Google Calendar events are not deleted by sync.
+5. **Dates.** Reads and writes use the Asia/Seoul calendar day. A Todomate timestamp at Seoul midnight no longer becomes the previous UTC date.
+6. **Preconditions.** Updates and deletes send `If-Match` when an etag is known. A 412 leaves the mapping in place.
+
+The legacy Python CLI raises immediately. It does not have these guards.
+
+Details and the rollout checklist: [docs/sync-safety.md](docs/sync-safety.md).
 
 ## Requirements
 

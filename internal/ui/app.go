@@ -276,8 +276,8 @@ func (s *Server) runSync() error {
 	}
 	cfg := s.settings
 	s.appendLog(
-		"Config: dry_run=%v import_unmapped_google_events=%v default_goal_id=%q",
-		cfg.DryRun, cfg.ImportUnmappedGoogleEvents, cfg.DefaultGoalID,
+		"Config: dry_run=%v import_unmapped_google_events=%v hard_delete=%v max_deletions=%d default_goal_id=%q",
+		cfg.DryRun, cfg.ImportUnmappedGoogleEvents, cfg.HardDelete, cfg.MaxDeletionsPerRun, cfg.DefaultGoalID,
 	)
 	httpClient, err := googleauth.GetClient(ctx, cfg.GoogleCredentials, cfg.GoogleToken)
 	if err != nil {

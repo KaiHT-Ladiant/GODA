@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,13 @@ import (
 	"time"
 
 	"github.com/local/google-to-domate/internal/models"
+	"github.com/local/google-to-domate/internal/seoul"
+)
+
+// Lookup errors. These are not proof that a todo was deleted.
+var (
+	ErrNotFound  = errors.New("todomate: todo not found")
+	ErrForbidden = errors.New("todomate: todo forbidden")
 )
 
 type Session struct {
@@ -32,6 +40,8 @@ type Client struct {
 	APIKey    string
 	ProjectID string
 	Session   Session
+	// baseURL overrides the Firestore host in tests.
+	baseURL string
 }
 
 func LoadSession(path string) (*Session, error) {
@@ -159,6 +169,9 @@ func NewClient(apiKey, projectID string, session Session) *Client {
 }
 
 func (c *Client) base() string {
+	if c.baseURL != "" {
+		return strings.TrimRight(c.baseURL, "/")
+	}
 	return fmt.Sprintf("https://firestore.googleapis.com/v1/projects/%s/databases/(default)/documents", c.ProjectID)
 }
 
@@ -249,11 +262,14 @@ func (c *Client) GetTodoItem(id string) (*models.TodoItem, error) {
 	}
 	defer res.Body.Close()
 	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusForbidden {
-		return nil, nil
+	switch res.StatusCode {
+	case http.StatusNotFound:
+		return nil, ErrNotFound
+	case http.StatusForbidden:
+		return nil, ErrForbidden
 	}
 	if res.StatusCode >= 300 {
-		return nil, fmt.Errorf("get todo: %s", string(body))
+		return nil, fmt.Errorf("get todo: status %d: %s", res.StatusCode, string(body))
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(body, &doc); err != nil {
@@ -266,7 +282,7 @@ func (c *Client) GetTodoItem(id string) (*models.TodoItem, error) {
 func (c *Client) CreateTodoItem(content, goalID string, onDate time.Time, memo, routineID string) (models.TodoItem, error) {
 	docID := randomID(20)
 	nowMS := time.Now().UTC().UnixMilli()
-	dateMS := time.Date(onDate.Year(), onDate.Month(), onDate.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	dateMS := dateMillis(onDate)
 	var routineVal any
 	if routineID != "" {
 		routineVal = routineID
@@ -295,8 +311,14 @@ func (c *Client) CreateTodoItem(content, goalID string, onDate time.Time, memo, 
 	return parseTodo(doc), nil
 }
 
-// RoutineRepeatDaily matches Todomate RoutineRepeatType.daily (0).
-const RoutineRepeatDaily = 0
+// Routine repeatType values observed in the Todomate client.
+const (
+	RoutineRepeatDaily    = 0
+	RoutineRepeatWeekly   = 1
+	RoutineRepeatMonthly  = 2
+	RoutineRepeatBiweekly = 3
+	RoutineRepeatYearly   = 4
+)
 
 type Routine struct {
 	ID         string
@@ -311,35 +333,46 @@ type Routine struct {
 }
 
 func (c *Client) CreateRoutine(title, goalID string, start, endInclusive time.Time) (Routine, error) {
+	return c.insertRoutine(title, goalID, start, endInclusive, RoutineRepeatDaily, nil)
+}
+
+func (c *Client) insertRoutine(title, goalID string, start, endInclusive time.Time, repeatType int, daysOfMonth []int) (Routine, error) {
 	docID := randomID(20)
 	nowMS := time.Now().UTC().UnixMilli()
-	startMS := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-	endMS := time.Date(endInclusive.Year(), endInclusive.Month(), endInclusive.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	startMS := dateMillis(start)
+	endMS := dateMillis(endInclusive)
+	var days any
+	if len(daysOfMonth) == 0 {
+		days = toValue(nil)
+	} else {
+		days = toArray(daysOfMonth)
+	}
 	fields := map[string]any{
-		"id":         toValue(docID),
-		"userID":     toValue(c.Session.LocalID),
-		"title":      toValue(title),
-		"goalID":     toValue(goalID),
-		"repeatType": toValue(int64(RoutineRepeatDaily)),
-		"startDate":  toValue(startMS),
-		"endDate":    toValue(endMS),
-		"createTime": toValue(nowMS),
-		"isManual":   toValue(false),
-		"time":       toValue(nil),
+		"id":          toValue(docID),
+		"userID":      toValue(c.Session.LocalID),
+		"title":       toValue(title),
+		"goalID":      toValue(goalID),
+		"repeatType":  toValue(int64(repeatType)),
+		"daysOfMonth": days,
+		"startDate":   toValue(startMS),
+		"endDate":     toValue(endMS),
+		"createTime":  toValue(nowMS),
+		"isManual":    toValue(false),
+		"time":        toValue(nil),
 	}
 	urlStr := fmt.Sprintf("%s/Routine?documentId=%s", c.base(), url.QueryEscape(docID))
 	var doc map[string]any
 	if err := c.doJSON(http.MethodPost, urlStr, map[string]any{"fields": fields}, &doc); err != nil {
 		return Routine{}, err
 	}
-	startCopy := time.UnixMilli(startMS).UTC()
-	endCopy := time.UnixMilli(endMS).UTC()
+	startCopy := seoul.Midnight(time.UnixMilli(startMS))
+	endCopy := seoul.Midnight(time.UnixMilli(endMS))
 	return Routine{
 		ID:         docID,
 		UserID:     c.Session.LocalID,
 		Title:      title,
 		GoalID:     goalID,
-		RepeatType: RoutineRepeatDaily,
+		RepeatType: repeatType,
 		StartDate:  &startCopy,
 		EndDate:    &endCopy,
 		CreateTime: nowMS,
@@ -406,8 +439,8 @@ func (c *Client) ListTodoItemsByRoutine(routineID string) ([]models.TodoItem, er
 // CreateRoutineWithDailyTodos creates a daily Routine and one TodoItem per day (inclusive).
 // Returns the routine and the start-day todo (for Google mapping).
 func (c *Client) CreateRoutineWithDailyTodos(title, goalID, memo string, start, endInclusive time.Time) (Routine, models.TodoItem, int, error) {
-	start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
-	endInclusive = time.Date(endInclusive.Year(), endInclusive.Month(), endInclusive.Day(), 0, 0, 0, 0, time.UTC)
+	start = seoul.Midnight(start)
+	endInclusive = seoul.Midnight(endInclusive)
 	if endInclusive.Before(start) {
 		endInclusive = start
 	}
@@ -430,6 +463,21 @@ func (c *Client) CreateRoutineWithDailyTodos(title, goalID, memo string, start, 
 	return routine, first, count, nil
 }
 
+// CreateSeriesRoutine maps one Google recurring series onto a single Todomate
+// Routine plus one representative todo. It does not expand every occurrence.
+func (c *Client) CreateSeriesRoutine(title, goalID, memo string, onDate time.Time, repeatType int, daysOfMonth []int) (Routine, models.TodoItem, error) {
+	onDate = seoul.Midnight(onDate)
+	routine, err := c.insertRoutine(title, goalID, onDate, onDate, repeatType, daysOfMonth)
+	if err != nil {
+		return Routine{}, models.TodoItem{}, err
+	}
+	item, err := c.CreateTodoItem(title, goalID, onDate, memo, routine.ID)
+	if err != nil {
+		return routine, models.TodoItem{}, err
+	}
+	return routine, item, nil
+}
+
 func (c *Client) DeleteRoutineAndTodos(routineID string) error {
 	if routineID == "" {
 		return nil
@@ -438,10 +486,16 @@ func (c *Client) DeleteRoutineAndTodos(routineID string) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, item := range items {
-		_ = c.DeleteTodoItem(item.ID)
+		if err := c.DeleteTodoItem(item.ID); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return c.DeleteRoutine(routineID)
+	if err := c.DeleteRoutine(routineID); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func (c *Client) UpdateTodoItem(id string, content *string, onDate *time.Time, memo *string) (models.TodoItem, error) {
@@ -452,8 +506,7 @@ func (c *Client) UpdateTodoItem(id string, content *string, onDate *time.Time, m
 		masks = append(masks, "content")
 	}
 	if onDate != nil {
-		ms := time.Date(onDate.Year(), onDate.Month(), onDate.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-		fields["date"] = toValue(ms)
+		fields["date"] = toValue(dateMillis(*onDate))
 		masks = append(masks, "date")
 	}
 	if memo != nil {
@@ -672,15 +725,28 @@ func toValue(v any) map[string]any {
 	}
 }
 
+func dateMillis(onDate time.Time) int64 {
+	return seoul.Midnight(onDate).UnixMilli()
+}
+
+func toArray(ints []int) map[string]any {
+	vals := make([]any, 0, len(ints))
+	for _, n := range ints {
+		vals = append(vals, toValue(int64(n)))
+	}
+	return map[string]any{"arrayValue": map[string]any{"values": vals}}
+}
+
 func parseDate(v any) *time.Time {
 	switch t := v.(type) {
 	case int64:
 		sec := t
+		var nsec int64
 		if t > 10_000_000_000 {
 			sec = t / 1000
+			nsec = (t % 1000) * int64(time.Millisecond)
 		}
-		d := time.Unix(sec, 0).UTC()
-		day := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+		day := seoul.Midnight(time.Unix(sec, nsec))
 		return &day
 	case float64:
 		return parseDate(int64(t))
@@ -688,7 +754,7 @@ func parseDate(v any) *time.Time {
 		if n, err := parseInt64(t); err == nil {
 			return parseDate(n)
 		}
-		if d, err := time.Parse("2006-01-02", t[:min(10, len(t))]); err == nil {
+		if d, err := time.ParseInLocation("2006-01-02", t[:min(10, len(t))], seoul.Location); err == nil {
 			return &d
 		}
 	}

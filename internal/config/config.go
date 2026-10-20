@@ -10,25 +10,31 @@ import (
 )
 
 type Settings struct {
-	IntervalSeconds             int
-	LookbackDays                int
-	LookaheadDays               int
-	DryRun                      bool
-	GoogleCalendarID            string
-	PreferGoogleOnTie           bool
-	ImportUnmappedGoogleEvents  bool
-	SkipCompletedTodos          bool
-	DataDir                     string
-	GoogleCredentials           string
-	GoogleToken                 string
-	TodomateSession             string
-	SQLiteDB                    string
-	TodomateAPIKey              string
-	TodomateProjectID           string
-	IncludeGoalIDs              []string
-	ExcludeGoalIDs              []string
-	DefaultGoalID               string
-	Root                        string
+	IntervalSeconds            int
+	LookbackDays               int
+	LookaheadDays              int
+	DryRun                     bool
+	GoogleCalendarID           string
+	PreferGoogleOnTie          bool
+	ImportUnmappedGoogleEvents bool
+	SkipCompletedTodos         bool
+	// MaxDeletionsPerRun aborts the cycle before any delete or tombstone
+	// when more links would be retired than this. Zero means "no deletions".
+	MaxDeletionsPerRun int
+	// HardDelete removes the remote object after a tombstone is allowed.
+	// Default false: deletions are soft (the mapping row is kept, marked).
+	HardDelete        bool
+	DataDir           string
+	GoogleCredentials string
+	GoogleToken       string
+	TodomateSession   string
+	SQLiteDB          string
+	TodomateAPIKey    string
+	TodomateProjectID string
+	IncludeGoalIDs    []string
+	ExcludeGoalIDs    []string
+	DefaultGoalID     string
+	Root              string
 }
 
 type fileConfig struct {
@@ -36,11 +42,13 @@ type fileConfig struct {
 		IntervalSeconds            int    `toml:"interval_seconds"`
 		LookbackDays               int    `toml:"lookback_days"`
 		LookaheadDays              int    `toml:"lookahead_days"`
-		DryRun                     bool   `toml:"dry_run"`
+		DryRun                     *bool  `toml:"dry_run"`
 		GoogleCalendarID           string `toml:"google_calendar_id"`
 		PreferGoogleOnTie          bool   `toml:"prefer_google_on_tie"`
 		ImportUnmappedGoogleEvents bool   `toml:"import_unmapped_google_events"`
 		SkipCompletedTodos         bool   `toml:"skip_completed_todos"`
+		MaxDeletionsPerRun         *int   `toml:"max_deletions_per_run"`
+		HardDelete                 *bool  `toml:"hard_delete"`
 	} `toml:"sync"`
 	Paths struct {
 		DataDir           string `toml:"data_dir"`
@@ -119,6 +127,8 @@ func defaults(root string) *Settings {
 		PreferGoogleOnTie:          true,
 		ImportUnmappedGoogleEvents: false,
 		SkipCompletedTodos:         true,
+		MaxDeletionsPerRun:         3,
+		HardDelete:                 false,
 		DataDir:                    filepath.Join(root, "data"),
 		GoogleCredentials:          filepath.Join(root, "credentials.json"),
 		GoogleToken:                filepath.Join(root, "token.json"),
@@ -140,13 +150,22 @@ func applyFile(s *Settings, raw fileConfig, root string) {
 	if raw.Sync.LookaheadDays > 0 {
 		s.LookaheadDays = raw.Sync.LookaheadDays
 	}
-	s.DryRun = raw.Sync.DryRun
+	// Missing dry_run keeps the safe default (true). An explicit false opts in.
+	if raw.Sync.DryRun != nil {
+		s.DryRun = *raw.Sync.DryRun
+	}
 	if raw.Sync.GoogleCalendarID != "" {
 		s.GoogleCalendarID = raw.Sync.GoogleCalendarID
 	}
 	s.PreferGoogleOnTie = raw.Sync.PreferGoogleOnTie
 	s.ImportUnmappedGoogleEvents = raw.Sync.ImportUnmappedGoogleEvents
 	s.SkipCompletedTodos = raw.Sync.SkipCompletedTodos
+	if raw.Sync.MaxDeletionsPerRun != nil {
+		s.MaxDeletionsPerRun = *raw.Sync.MaxDeletionsPerRun
+	}
+	if raw.Sync.HardDelete != nil {
+		s.HardDelete = *raw.Sync.HardDelete
+	}
 
 	s.DataDir = resolve(root, raw.Paths.DataDir, s.DataDir)
 	s.GoogleCredentials = resolve(root, raw.Paths.GoogleCredentials, s.GoogleCredentials)
